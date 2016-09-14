@@ -100,10 +100,6 @@ namespace seahorn
 
     void defineEntryFunction(Module &M); 
 
-    void printModule(Module &M);
-    
-    void printFunction(Function *F);
-
     void report();
 
   public:

@@ -17,6 +17,10 @@
 
 #include "seahorn/Transforms/Utils/Local.hh"
 
+#include "llvm/Bitcode/ReaderWriter.h"
+#include "llvm/Support/FileSystem.h"
+#include <fstream>
+
 
 namespace seahorn
 {
@@ -35,7 +39,6 @@ namespace seahorn
          }
       }
 
-
       // First, get the basic blocks in topological order
       std::vector<const BasicBlock*> sortedBBlocks;
       RevTopoSort(*F,sortedBBlocks);
@@ -45,7 +48,7 @@ namespace seahorn
       BBApiList bblist;
       unsigned int initProgress = progress;
 
-      while ( progress < m_apilist.size())
+      while (progress < m_apilist.size())
       {
          std::string API = m_apilist.at(progress);
 
@@ -253,29 +256,38 @@ namespace seahorn
 
       // Once the analysis completes, we know the possible entry points. Now, make
       // one of those a actual entry
+      bool foundPattern=false;
+      for (auto& analysis : m_apiAnalysis)
+      {
+         if (!analysis.m_bblist.empty())
+         {
+            ApiEntry final = analysis.getFinalAnalysis();
+            if (final.m_progress == m_apilist.size())
+            {               
+               foundPattern = true;
+               break;
+            }
+         }
+      }
+      if (!foundPattern) 
+      {
+            errs() << "API sequence not found\n";
+      }
+      else
+      {
+          defineEntryFunction(M);
+          errs() << *(M.getFunction("main")) << "\n";
+      }          
 
-      defineEntryFunction(M);
-    
+      std::error_code EC;
+      raw_ostream *out = new raw_fd_ostream("out.bc", EC, sys::fs::F_None);
+      WriteBitcodeToFile(&M, *out);
+      delete out;
+      
       return false;
    }
 
-   void ApiAnalysisPass::printModule(Module &M)
-   {
-      for (auto curFref = M.getFunctionList().begin(), endFref = M.getFunctionList().end(); curFref != endFref; ++curFref)
-      {
-         printFunction(curFref);
-      }
-      outs() << "\n";
-   }
-
-   void ApiAnalysisPass::printFunction(Function *F)
-   {
-      for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I)
-      {
-         F->print(errs());
-      }
-   }
-
+   // TODO: Figure out why this doesn't work
    // Define a new entry point to trigger this behavior
    void ApiAnalysisPass::defineEntryFunction(Module &M)
    {
@@ -287,6 +299,8 @@ namespace seahorn
          return;
       }
 
+      // There is at least one starting point ...
+      
       LLVMContext &C = M.getContext ();
 
       Function *oldMain = M.getFunction ("main");
@@ -306,36 +320,51 @@ namespace seahorn
 
       BasicBlock *entry = BasicBlock::Create(newMain->getContext(), "entry", newMain);
 
-      IRBuilder<> builder (M.getContext ());
+      IRBuilder<> builder (C);
       builder.SetInsertPoint (entry, entry->begin ());
-
     
       Function *startFunc = M.getFunction (m_startingPoints[0]->getName()); // for now just pick the first one
 
-      SmallVector<Value*,16> startFuncParams;
+      // set the arguments 
+      SmallVector<Value*,16> realArgs;
       for (auto &a : boost::make_iterator_range (startFunc->arg_begin (), startFunc->arg_end ()))
       {
-         startFuncParams.push_back(&a);
-      }
+         Type *t = a.getType();
 
-      // Create the setter functions
-      SmallVector<Value*,16> vals;
-    
-      for (auto &a : startFuncParams)
-      {
-         Type *t = a->getType();
-         Function &ndfn = seahorn::createNewNondetFn(M, *t, 1, "__sea_get_arg"); 
-  
-         builder.SetInsertPoint (entry);
-         Value* p = builder.CreateCall(&ndfn);
-         vals.push_back(p);
+         Value* ndRetVal = nullptr;
+         
+         // If this argument is a pointer type, then handle it differently
+         if (t->isPointerTy()) {
+             outs() << "Argument '" << a.getName() << "' is a pointer\n";
+
+
+             Value *numElm = ConstantInt::get(newMain->getContext(), APInt(32, 100));
+             AllocaInst *allocaInst = builder.CreateAlloca(t->getPointerElementType(), numElm, "mem");
+             Value *elm = builder.CreateGEP(allocaInst,
+                                            ConstantInt::get(C, APInt(32, 0)),
+                                            "ptr");
+             
+             Function &ndfn = seahorn::createNewNondetFn(M, *(t->getPointerElementType()), 1, "__sea_get_arg");
+             
+             Value* val = builder.CreateCall(&ndfn);
+             builder.CreateStore(val, elm);
+             ndRetVal = elm; 
+         }
+         else {
+             outs() << "Argument '" << a.getName() << "' is a NOT a pointer\n";
+             Function &ndfn = seahorn::createNewNondetFn(M, *t, 1, "__sea_get_arg");
+             ndRetVal = builder.CreateCall(&ndfn);
+         }        
+         // Add the non-deterministically created argument
+         realArgs.push_back(ndRetVal);         
       }
 
       // create the call to the "real" main function
-      CallInst *mcall = builder.CreateCall (startFunc, vals);
+      CallInst *mcall = builder.CreateCall (startFunc, realArgs);
 
       // return 0 from the new main
-      builder.CreateRet(ConstantInt::get(getGlobalContext(), APInt(32, 0)));
+      builder.CreateRet(ConstantInt::get(newMain->getContext(), APInt(32, 0)));
+      
    }
 
    void ApiAnalysisPass::getAnalysisUsage (AnalysisUsage &AU) const {
