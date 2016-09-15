@@ -17,11 +17,6 @@
 
 #include "seahorn/Transforms/Utils/Local.hh"
 
-#include "llvm/Bitcode/ReaderWriter.h"
-#include "llvm/Support/FileSystem.h"
-#include <fstream>
-
-
 namespace seahorn
 {
    using namespace llvm;
@@ -278,11 +273,6 @@ namespace seahorn
           defineEntryFunction(M);
           errs() << *(M.getFunction("main")) << "\n";
       }          
-
-      std::error_code EC;
-      raw_ostream *out = new raw_fd_ostream("out.bc", EC, sys::fs::F_None);
-      WriteBitcodeToFile(&M, *out);
-      delete out;
       
       return false;
    }
